@@ -2,3 +2,7 @@ cache/
 out/
 __pycache__/
 sounds/
+
+# 著作権のある曲(ゲーム音楽、自動採譜したJ-POPなど)は公開しない
+pieces/game/
+pieces/youtube/
