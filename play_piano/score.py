@@ -26,6 +26,7 @@ class Note:
     role: str = "inner"  # melody / bass / inner
     vel_hint: int = 64
     track: int = 0
+    inst: str = ""  # 合奏で鳴らす楽器(strings.SPECS のキー)。空なら選んでいる音源
 
 
 @dataclass

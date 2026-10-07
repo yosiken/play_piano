@@ -61,6 +61,12 @@ SPECS: dict[str, StringSpec] = {
         body=(), pickup=0.22, amp_fc=4500, click=0.15, max_seconds=8.0, gain=1.6),
 }
 
+# ギター＋ベースの合奏: キー → (ギターの種類, 表示名)
+BANDS = {
+    "band_steel": ("steel", "ギター＋ベース（アコースティック）"),
+    "band_nylon": ("nylon", "ギター＋ベース（クラシック）"),
+}
+
 # 鳴らす強さの目安: 強くはじいた音の最初の0.5秒の実効値(合成ピアノと同じくらいの音量にそろえる)
 _TARGET_RMS = 0.42
 

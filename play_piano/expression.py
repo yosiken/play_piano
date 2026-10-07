@@ -182,7 +182,7 @@ def presets_for(instrument: str) -> dict[str, tuple[str, Params]]:
     """楽器(piano / nylon / steel / bass)に合う奏者のプリセット。"""
     if instrument == "bass":
         return BASS_PRESETS
-    if instrument in ("nylon", "steel"):
+    if instrument in ("nylon", "steel") or instrument.startswith("band_"):
         return GUITAR_PRESETS
     return PRESETS
 
@@ -301,8 +301,8 @@ class Performer:
                 off += P.lead_ms / 1000
             vel = self._velocity(n, beat)
             dur = max(0.04, n.dur * sec_per_beat * P.legato)
-            eng.schedule(at(t_sec + off), "on", n.pitch, vel)
-            eng.schedule(at(t_sec + off + dur), "off", n.pitch)
+            eng.schedule(at(t_sec + off), "on", n.pitch, vel, n.inst)
+            eng.schedule(at(t_sec + off + dur), "off", n.pitch, n.inst)
 
     def _iter_times(self):
         """(timelineの要素, 演奏開始からの秒) を順に返す。テンポは都度計算する。"""
@@ -321,7 +321,7 @@ class Performer:
         """WAV書き出し用: 全イベントを予約して波形を返す。"""
         import numpy as np
 
-        self.engine.prepare([n.pitch for n in self.score.notes])
+        self.engine.prepare_notes(self.score.notes)
         start = self.engine.clock + int(0.05 * SR)
         t = 0.0
         for item, t in self._iter_times():

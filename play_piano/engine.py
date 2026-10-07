@@ -31,10 +31,11 @@ SAMPLE_GAIN = 1.6  # サンプル音源の音量を合成音とそろえる係�
 
 class _Voice:
     __slots__ = ("note", "low", "high", "pos", "amp", "bright", "gains", "delays",
-                 "key_down", "level", "fast_damp", "vel")
+                 "key_down", "level", "fast_damp", "vel", "inst")
 
-    def __init__(self, note, low, high, offset, vel):
+    def __init__(self, note, low, high, offset, vel, inst=""):
         self.note = note
+        self.inst = inst
         self.low = low
         self.high = high
         self.pos = -offset  # ブロック先頭での音の内部位置(負 = まだ鳴っていない)
@@ -87,6 +88,8 @@ class AudioEngine:
                  room: str = "コンサートホール", sampler: SFZBank | None = None):
         self.bank = bank or NoteBank()  # 合成音: ピアノ(NoteBank) またはギター・ベース(StringBank)
         self.sampler = sampler  # None なら合成音
+        # 合奏で使う、ほかの楽器の合成音(楽器のキー → StringBank)
+        self.extra_banks: dict[str, StringBank] = {}
         self.shots: list[SampleVoice] = []  # 録音されたリリース音・ペダル音
         self._rand = np.random.default_rng(0)
         self.max_voices = max_voices
@@ -118,6 +121,25 @@ class AudioEngine:
         """ギター・ベースを鳴らしているか(ピアノのペダル音や弦の共鳴は鳴らさない)。"""
         return self.sampler is None and isinstance(self.bank, StringBank)
 
+    def _bank_for(self, inst: str):
+        if not inst or inst == getattr(self.bank, "kind", None):
+            return self.bank
+        if inst not in self.extra_banks:
+            self.extra_banks[inst] = StringBank(inst)
+        return self.extra_banks[inst]
+
+    def prepare_notes(self, notes, progress=None) -> None:
+        """曲の音符(合奏なら楽器ごと)に必要な音を準備する。"""
+        by_inst: dict[str, list[int]] = {}
+        for n in notes:
+            by_inst.setdefault(n.inst, []).append(n.pitch)
+        for inst, pitches in by_inst.items():
+            bank = self._bank_for(inst)
+            if bank is self.bank:
+                self.prepare(pitches, progress)
+            else:
+                bank.prepare(pitches, progress)
+
     def prepare(self, pitches, progress=None) -> None:
         """曲で使う音を準備する(合成音なら合成、サンプルなら先読み)。"""
         if self.sampler is not None:
@@ -145,21 +167,21 @@ class AudioEngine:
         if self.noise > 0:
             self.oneshots.append([self._noises[name], -offset, gain * self.noise])
 
-    def _note_on(self, note, vel, offset):
+    def _note_on(self, note, vel, offset, inst=""):
         if not 21 <= note <= 108 or vel <= 0:
             return
         for v in self.voices:
-            if v.note == note:
+            if v.note == note and getattr(v, "inst", "") == inst:
                 v.fast_damp = True  # 同じ鍵盤の打ち直し
         if len(self.voices) >= self.max_voices:
             self.voices.sort(key=lambda v: v.level * v.amp)
             del self.voices[: len(self.voices) - self.max_voices + 1]
-        if self.sampler is not None:
+        if self.sampler is not None and not inst:
             voice = SampleVoice(note, self.sampler.find(note, vel), offset, vel, SAMPLE_GAIN)
             voice.t_on = self.clock + offset
         else:
-            low, high = self.bank.get(note)
-            voice = _Voice(note, low, high, offset, vel)
+            low, high = self._bank_for(inst).get(note)
+            voice = _Voice(note, low, high, offset, vel, inst)
         self.voices.append(voice)
         self.visual.append((note, vel))
 
@@ -186,9 +208,9 @@ class AudioEngine:
         else:
             self._oneshot("pedal_down" if down else "pedal_up", 1.0, offset)
 
-    def _note_off(self, note, offset):
+    def _note_off(self, note, offset, inst=""):
         for v in self.voices:
-            if v.note == note and v.key_down:
+            if v.note == note and v.key_down and getattr(v, "inst", "") == inst:
                 v.key_down = False
                 if not self.pedal_down and note < NO_DAMPER_FROM:
                     self._damper_sound(v, offset)
@@ -196,9 +218,9 @@ class AudioEngine:
 
     def _apply(self, kind, args, offset):
         if kind == "on":
-            self._note_on(args[0], args[1], offset)
+            self._note_on(args[0], args[1], offset, *args[2:])
         elif kind == "off":
-            self._note_off(args[0], offset)
+            self._note_off(args[0], offset, *args[1:])
         elif kind == "pedal":
             down = bool(args[0])
             if down != self.pedal_down:

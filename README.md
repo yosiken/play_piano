@@ -36,6 +36,9 @@ python main.py
 |---|---|---|
 | クラシックギター（ナイロン弦）／アコースティックギター（スチール弦） | メロディ＋伴奏／メロディだけ | クラシックギター風（歌うアルペジオ）、弾き語り風（ストローク）、フラメンコ風、ジャズ・ギター風、ボサノヴァ風 |
 | エレキベース | ベースライン／ベースライン（8分で刻む）／メロディ | フィンガー風、ロック風、ファンク風、バラード風 |
+| ギター＋ベース（アコースティック／クラシック） | メロディ＋伴奏＋ベース／同（ベースは8分で刻む）／伴奏＋ベース（メロディなし） | ギターと同じ |
+
+「ギター＋ベース」はピアノを使わず、ギターとベースの2人で合奏します。ベースがバスの声部を、ギターがそれ以外の声部を受け持ちます。
 
 - **編曲**：音域外の音はオクターブ移動して収めます。ギターは同時に鳴る音を6本の弦までに減らし（メロディとバスを優先）、同じ高さの音は弾き直します。ベースはバスの声部を単音の線として取り出します
 - **つまみ**：ギター・ベースでは「ペダル」が「響かせる（レットリング）」に、「和音のばらし」が「ストローク・アルペジオ」になります。「アップストローク」を上げると、裏拍の和音を高い弦からかき鳴らします
@@ -50,6 +53,7 @@ python main.py --render out.wav --piece bach_wtc1-02 --preset グールド   # �
 python main.py --render out.wav --piece elise --instrument nylon --preset クラシック   # クラシックギター
 python main.py --render out.wav --piece korobeiniki --instrument steel --preset 弾き語り
 python main.py --render out.wav --piece korobeiniki --instrument bass --part bass8 --preset ロック
+python main.py --render out.wav --piece korobeiniki --instrument band_steel --preset 弾き語り   # ギター＋ベース
 python main.py --list   # 奏者とパートの一覧
 ```
 

@@ -11,12 +11,12 @@ from tkinter import filedialog, messagebox, ttk
 from .engine import AudioEngine
 from .expression import PARAM_INFO, PLUCKED_LABELS, PRESETS, Params, Performer, presets_for
 from .acoustics import ROOMS
-from .arrange import PARTS, arrange
+from .arrange import PARTS, arrange, part_family
 from .sampler import SFZBank, find_sfz
 from . import score as score_mod
 from .score import BUILTIN, list_piece_files, load_midi, load_piece
 from .shuffle import ShufflePicker, estimate_seconds
-from .strings import SPECS, StringBank
+from .strings import BANDS, SPECS, StringBank
 
 BLACK = {1, 3, 6, 8, 10}
 
@@ -39,8 +39,13 @@ class App:
             except Exception as e:  # noqa: BLE001
                 print("SFZの読み込みに失敗:", e)
         # ギター・ベース(合成)。ピアノの楽譜を編曲して弾く
-        for kind in SPECS:
-            self.instruments[SPECS[kind].name] = StringBank(kind)
+        self.string_banks = {kind: StringBank(kind) for kind in SPECS}
+        for kind, bank in self.string_banks.items():
+            self.instruments[bank.name] = bank
+        # ギター＋ベースの合奏(値は BANDS のキー)
+        for key, (_, name) in BANDS.items():
+            self.instruments[name] = key
+        self.engine.extra_banks = self.string_banks
         self.piano_bank = self.engine.bank
         self.engine.sampler = next(iter(self.instruments.values()))
         self.engine.start()
@@ -210,7 +215,9 @@ class App:
     def _family(self) -> str:
         """いま選んでいる楽器: piano / nylon / steel / bass"""
         inst = self.instruments[self.inst_box.get()]
-        return inst.kind if isinstance(inst, StringBank) else "piano"
+        if isinstance(inst, StringBank):
+            return inst.kind
+        return inst if isinstance(inst, str) else "piano"
 
     def _presets(self):
         return presets_for(self._family())
@@ -245,11 +252,18 @@ class App:
         if isinstance(inst, StringBank):
             self.engine.sampler = None
             self.engine.bank = inst
+        elif isinstance(inst, str):  # 合奏: ギターを主の音源にし、ベースは音符ごとに切り替える
+            self.engine.sampler = None
+            self.engine.bank = self.string_banks[BANDS[inst][0]]
         else:
             self.engine.sampler = inst
             self.engine.bank = self.piano_bank
         family = self._family()
         presets = list(self._presets())
+        new_parts = [] if family == "piano" else [v for _, v in PARTS[part_family(family)]]
+        if new_parts != list(self.part_box.cget("values")):
+            self.part_box.config(values=new_parts, state="readonly" if new_parts else "disabled")
+            self.part_box.set(new_parts[0] if new_parts else "")
         if presets != old_presets:  # ピアノ ⇔ ギター ⇔ ベース を切り替えた
             self.preset_box.config(values=presets)
             default = "ルービンシュタイン風（気品ある歌）" if family == "piano" else presets[1]
@@ -259,13 +273,6 @@ class App:
             for name, label, _, _ in PARAM_INFO:
                 text = PLUCKED_LABELS.get(name, label) if family != "piano" else label
                 self.slider_labels[name].config(text=text)
-            if family == "piano":
-                self.part_box.set("")
-                self.part_box.config(values=[], state="disabled")
-            else:
-                labels = [v for _, v in PARTS["bass" if family == "bass" else "guitar"]]
-                self.part_box.config(values=labels, state="readonly")
-                self.part_box.set(labels[0])
         self._prepare_async()
 
     def _set_part(self):
@@ -277,7 +284,7 @@ class App:
         family = self._family()
         if family == "piano":
             return score
-        parts = PARTS["bass" if family == "bass" else "guitar"]
+        parts = PARTS[part_family(family)]
         part = next((k for k, v in parts if v == self.part_box.get()), parts[0][0])
         return arrange(score, family, part)
 
@@ -417,16 +424,16 @@ class App:
 
     def _prepare_async(self):
         self.play_score = self._arranged(self.score)
-        pitches = [n.pitch for n in self.play_score.notes]
+        notes = self.play_score.notes
         self._preparing = True
         self.play_btn.state(["disabled"])
-        what = getattr(self.engine.bank, "name", "ピアノ") if self.engine.sampler is None else "ピアノ"
+        what = "ピアノ" if self._family() == "piano" else self.inst_box.get()
 
         def progress(i, n):
             self._ui_queue.put(lambda: self.status.config(text=f"{what}の音を準備中… {i}/{n}"))
 
         def work():
-            self.engine.prepare(pitches, progress)
+            self.engine.prepare_notes(notes, progress)
             self._ui_queue.put(self._prepared)
 
         threading.Thread(target=work, daemon=True).start()

@@ -3,12 +3,13 @@
 ギター: 音域(6弦の開放 E2 〜 最高フレット)に収め、同時に鳴る音を弦の数(6本)までにする。
         同じ高さの音を重ねて鳴らすことはできない(同じ弦を弾き直す)。
 ベース: 単音楽器なので、バスの声部(または旋律)を1本の線として取り出す。
+ギター＋ベース: ベースがバスの声部を、ギターが残りの声部を受け持つ。
 ペダルの位置はそのまま残し、ギターでは「響かせる(レットリング)」、ベースでは音を伸ばす目安に使う。
 """
 from __future__ import annotations
 
 from .score import Note, Score
-from .strings import SPECS, fold
+from .strings import BANDS, SPECS, fold
 
 GUITAR_STRINGS = 6
 
@@ -16,7 +17,20 @@ GUITAR_STRINGS = 6
 PARTS = {
     "guitar": [("full", "メロディ＋伴奏"), ("melody", "メロディだけ")],
     "bass": [("bass", "ベースライン"), ("bass8", "ベースライン（8分で刻む）"), ("melody", "メロディ")],
+    "band": [("full", "メロディ＋伴奏＋ベース"), ("full8", "メロディ＋伴奏＋ベース（8分で刻む）"),
+             ("backing", "伴奏＋ベース（メロディなし）")],
 }
+
+
+def part_family(instrument: str) -> str:
+    """楽器のキー → PARTS のキー"""
+    if instrument in BANDS:
+        return "band"
+    return "bass" if instrument == "bass" else "guitar"
+
+
+def instrument_name(instrument: str) -> str:
+    return BANDS[instrument][1] if instrument in BANDS else SPECS[instrument].name
 
 
 def _copy(score: Score, notes: list[Note], title: str) -> Score:
@@ -121,11 +135,33 @@ def _guitar_full(score: Score, lo: int, hi: int) -> list[Note]:
     return out
 
 
+def _band(score: Score, guitar: str, part: str) -> list[Note]:
+    bs = SPECS["bass"]
+    bass = _bass_line(score, bs.lo, bs.lo + 24)
+    if part == "full8":
+        bass = _eighths(bass)
+    # ギターはバス以外の声部(伴奏だけならメロディも除く)
+    skip = {"bass"} if part != "backing" else {"bass", "melody"}
+    rest = [n for n in score.notes if n.role not in skip]
+    gs = SPECS[guitar]
+    gtr = _guitar_full(_copy(score, rest, score.title), gs.lo, gs.hi) if rest else []
+    for n in bass:
+        n.inst = "bass"
+    for n in gtr:
+        n.inst = guitar
+    return sorted(gtr + bass, key=lambda n: (n.start, n.pitch))
+
+
 def arrange(score: Score, instrument: str, part: str | None = None) -> Score:
-    """instrument: "nylon" / "steel" / "bass"(strings.SPECS のキー)"""
-    spec = SPECS[instrument]
-    family = "bass" if instrument == "bass" else "guitar"
+    """instrument: "nylon" / "steel" / "bass"(strings.SPECS のキー)、または "band_steel" などの合奏"""
+    family = part_family(instrument)
     part = part or PARTS[family][0][0]
+    label = dict(PARTS[family])[part]
+    name = instrument_name(instrument)
+    if family == "band":
+        notes = _band(score, BANDS[instrument][0], part)
+        return _copy(score, notes, f"{score.title}〔{name}：{label}〕")
+    spec = SPECS[instrument]
     lo, hi = spec.lo, spec.hi
     if family == "bass":
         if part == "melody":
@@ -141,5 +177,4 @@ def arrange(score: Score, instrument: str, part: str | None = None) -> Score:
         notes = _guitar_full(score, lo, hi)
     if not notes:
         raise ValueError(f"{spec.name}で弾ける音が見つかりませんでした")
-    label = dict(PARTS[family])[part]
-    return _copy(score, notes, f"{score.title}〔{spec.name}：{label}〕")
+    return _copy(score, notes, f"{score.title}〔{name}：{label}〕")
