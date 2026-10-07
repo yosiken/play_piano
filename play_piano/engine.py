@@ -22,6 +22,7 @@ import numpy as np
 from . import acoustics
 from .acoustics import ROOMS, Convolver
 from .sampler import SampleVoice, SFZBank
+from .strings import StringBank
 from .synth import CACHE_DIR, NO_DAMPER_FROM, SR, NoteBank, vel_amp, vel_bright
 
 BLOCK = 1024
@@ -82,9 +83,9 @@ def _noise_samples():
 
 
 class AudioEngine:
-    def __init__(self, bank: NoteBank | None = None, max_voices: int = 96, room: str = "コンサートホール",
-                 sampler: SFZBank | None = None):
-        self.bank = bank or NoteBank()
+    def __init__(self, bank: NoteBank | StringBank | None = None, max_voices: int = 96,
+                 room: str = "コンサートホール", sampler: SFZBank | None = None):
+        self.bank = bank or NoteBank()  # 合成音: ピアノ(NoteBank) またはギター・ベース(StringBank)
         self.sampler = sampler  # None なら合成音
         self.shots: list[SampleVoice] = []  # 録音されたリリース音・ペダル音
         self._rand = np.random.default_rng(0)
@@ -111,6 +112,11 @@ class AudioEngine:
         # GUI表示用 (note, vel) / ('pedal', bool)
         self.visual: deque = deque(maxlen=4096)
         self._stream = None
+
+    @property
+    def plucked(self) -> bool:
+        """ギター・ベースを鳴らしているか(ピアノのペダル音や弦の共鳴は鳴らさない)。"""
+        return self.sampler is None and isinstance(self.bank, StringBank)
 
     def prepare(self, pitches, progress=None) -> None:
         """曲で使う音を準備する(合成音なら合成、サンプルなら先読み)。"""
@@ -160,7 +166,8 @@ class AudioEngine:
     def _damper_sound(self, v, offset):
         """ダンパーが下りる音。サンプル音源では録音された弦の余韻とハンマー音を使う。"""
         if self.sampler is None:
-            self._oneshot("damper", 0.4 + v.vel / 127, offset)
+            # ギター・ベースでは指で弦を押さえて止める、小さな音
+            self._oneshot("damper", (0.4 + v.vel / 127) * (0.5 if self.plucked else 1.0), offset)
             return
         held = max(0.0, (self.clock + offset - v.t_on) / SR)
         for z in self.sampler.find_release(v.note, v.vel):
@@ -170,6 +177,8 @@ class AudioEngine:
                 self.shots.append(SampleVoice(v.note, z, offset, v.vel, gain))
 
     def _pedal_sound(self, down, offset):
+        if self.plucked:
+            return
         zones = (self.sampler.pedal_down if down else self.sampler.pedal_up) if self.sampler else []
         if zones:
             z = zones[int(self._rand.integers(len(zones)))]
@@ -285,11 +294,12 @@ class AudioEngine:
         mono = dry.mean(axis=1)
 
         # 弦の共鳴: ペダルの踏み込みに応じてなめらかに増減
-        target = (self.pedal_depth if self.pedal_down else 0.0) * self.resonance
+        res = 0.0 if self.plucked else self.resonance
+        target = (self.pedal_depth if self.pedal_down else 0.0) * res
         pg = self._pedal_gain + (target - self._pedal_gain) * np.minimum(1.0, (ramp + 1) / (0.05 * SR))
         self._pedal_gain = float(pg[-1])
         res_pedal, res_free = self._res_conv.process(mono)
-        out = dry + res_pedal * (0.05 * pg)[:, None] + res_free * (0.02 * self.resonance)
+        out = dry + res_pedal * (0.05 * pg)[:, None] + res_free * (0.02 * res)
 
         if self._rev_conv is not None:
             out += self._rev_conv.process(mono)[0] * self.wet

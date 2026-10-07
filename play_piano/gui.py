@@ -9,12 +9,14 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from .engine import AudioEngine
-from .expression import PARAM_INFO, PRESETS, Params, Performer
+from .expression import PARAM_INFO, PLUCKED_LABELS, PRESETS, Params, Performer, presets_for
 from .acoustics import ROOMS
+from .arrange import PARTS, arrange
 from .sampler import SFZBank, find_sfz
 from . import score as score_mod
 from .score import BUILTIN, list_piece_files, load_midi, load_piece
 from .shuffle import ShufflePicker, estimate_seconds
+from .strings import SPECS, StringBank
 
 BLACK = {1, 3, 6, 8, 10}
 
@@ -36,6 +38,10 @@ class App:
                 self.instruments = {f"{bank.name}（録音）": bank, "合成ピアノ": None}
             except Exception as e:  # noqa: BLE001
                 print("SFZの読み込みに失敗:", e)
+        # ギター・ベース(合成)。ピアノの楽譜を編曲して弾く
+        for kind in SPECS:
+            self.instruments[SPECS[kind].name] = StringBank(kind)
+        self.piano_bank = self.engine.bank
         self.engine.sampler = next(iter(self.instruments.values()))
         self.engine.start()
         self.params = Params()
@@ -49,6 +55,7 @@ class App:
             self.catalog[name] = (lambda path=path: load_piece(path))
         self.loaded = {}
         self.score = self._get_score(next(iter(self.catalog)))
+        self.play_score = self.score  # 実際に弾く楽譜(ギター・ベースでは編曲したもの)
         self.vars: dict[str, tk.DoubleVar] = {}
         self.pressed: dict[int, int] = {}
         self._preparing = False
@@ -83,7 +90,8 @@ class App:
         self.url_btn = ttk.Button(files, text="URLから採譜…", command=self._transcribe_dialog)
         self.url_btn.pack(side="left", padx=(4, 0))
 
-        ttk.Label(top, text="ピアニスト").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.player_label = ttk.Label(top, text="ピアニスト")
+        self.player_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.preset_box = ttk.Combobox(top, state="readonly", width=46, values=list(PRESETS))
         self.preset_box.grid(row=1, column=1, padx=6, pady=(8, 0))
         self.preset_box.bind("<<ComboboxSelected>>", lambda e: self._apply_preset(self.preset_box.get()))
@@ -117,12 +125,15 @@ class App:
         sliders = ttk.LabelFrame(self.root, text="表現（再生中も変更できます）", padding=8)
         sliders.pack(fill="both", expand=True, padx=10)
         half = (len(PARAM_INFO) + 1) // 2
+        self.slider_labels = {}
         for i, (name, label, lo, hi) in enumerate(PARAM_INFO):
             col = 0 if i < half else 3
             row = i if i < half else i - half
             var = tk.DoubleVar(value=getattr(self.params, name))
             self.vars[name] = var
-            ttk.Label(sliders, text=label, width=20).grid(row=row, column=col, sticky="w")
+            lab = ttk.Label(sliders, text=label, width=24)
+            lab.grid(row=row, column=col, sticky="w")
+            self.slider_labels[name] = lab
             ttk.Scale(sliders, from_=lo, to=hi, variable=var, length=260,
                       command=lambda v, n=name: self._on_slider(n)).grid(row=row, column=col + 1, padx=4, pady=2)
             val = ttk.Label(sliders, width=6)
@@ -142,6 +153,10 @@ class App:
         self.room_box.set(self.engine.room)
         self.room_box.grid(row=1, column=1, padx=(4, 18), pady=(6, 0), sticky="w")
         self.room_box.bind("<<ComboboxSelected>>", lambda e: self._set_room())
+        ttk.Label(sound, text="パート").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.part_box = ttk.Combobox(sound, state="disabled", width=30, values=[])
+        self.part_box.grid(row=2, column=1, padx=(4, 18), pady=(6, 0), sticky="w")
+        self.part_box.bind("<<ComboboxSelected>>", lambda e: self._set_part())
         self.sound_vars = {}
         for i, (attr, label, hi) in enumerate((("wet", "残響の量", 0.8),
                                                ("resonance", "弦の共鳴", 2.0),
@@ -192,8 +207,16 @@ class App:
             self.kb.itemconfig(item, fill="black" if m % 12 in BLACK else "white")
 
     # ---- 操作 ----
+    def _family(self) -> str:
+        """いま選んでいる楽器: piano / nylon / steel / bass"""
+        inst = self.instruments[self.inst_box.get()]
+        return inst.kind if isinstance(inst, StringBank) else "piano"
+
+    def _presets(self):
+        return presets_for(self._family())
+
     def _apply_preset(self, name):
-        desc, params = PRESETS[name]
+        desc, params = self._presets()[name]
         self.params.__dict__.update(copy.copy(params).__dict__)
         for k, var in self.vars.items():
             var.set(getattr(self.params, k))
@@ -217,8 +240,46 @@ class App:
 
     def _set_instrument(self):
         self._stop()
-        self.engine.sampler = self.instruments[self.inst_box.get()]
+        old_presets = list(self.preset_box.cget("values"))
+        inst = self.instruments[self.inst_box.get()]
+        if isinstance(inst, StringBank):
+            self.engine.sampler = None
+            self.engine.bank = inst
+        else:
+            self.engine.sampler = inst
+            self.engine.bank = self.piano_bank
+        family = self._family()
+        presets = list(self._presets())
+        if presets != old_presets:  # ピアノ ⇔ ギター ⇔ ベース を切り替えた
+            self.preset_box.config(values=presets)
+            default = "ルービンシュタイン風（気品ある歌）" if family == "piano" else presets[1]
+            self.preset_box.set(default)
+            self._apply_preset(default)
+            self.player_label.config(text={"piano": "ピアニスト", "bass": "ベーシスト"}.get(family, "ギタリスト"))
+            for name, label, _, _ in PARAM_INFO:
+                text = PLUCKED_LABELS.get(name, label) if family != "piano" else label
+                self.slider_labels[name].config(text=text)
+            if family == "piano":
+                self.part_box.set("")
+                self.part_box.config(values=[], state="disabled")
+            else:
+                labels = [v for _, v in PARTS["bass" if family == "bass" else "guitar"]]
+                self.part_box.config(values=labels, state="readonly")
+                self.part_box.set(labels[0])
         self._prepare_async()
+
+    def _set_part(self):
+        self._stop()
+        self._prepare_async()
+
+    def _arranged(self, score):
+        """選んでいる楽器で弾く楽譜。"""
+        family = self._family()
+        if family == "piano":
+            return score
+        parts = PARTS["bass" if family == "bass" else "guitar"]
+        part = next((k for k, v in parts if v == self.part_box.get()), parts[0][0])
+        return arrange(score, family, part)
 
     def _set_room(self):
         self.engine.set_room(self.room_box.get())
@@ -355,12 +416,14 @@ class App:
                 self._after_prepared = select
 
     def _prepare_async(self):
-        pitches = [n.pitch for n in self.score.notes]
+        self.play_score = self._arranged(self.score)
+        pitches = [n.pitch for n in self.play_score.notes]
         self._preparing = True
         self.play_btn.state(["disabled"])
+        what = getattr(self.engine.bank, "name", "ピアノ") if self.engine.sampler is None else "ピアノ"
 
         def progress(i, n):
-            self._ui_queue.put(lambda: self.status.config(text=f"ピアノの音を準備中… {i}/{n}"))
+            self._ui_queue.put(lambda: self.status.config(text=f"{what}の音を準備中… {i}/{n}"))
 
         def work():
             self.engine.prepare(pitches, progress)
@@ -371,7 +434,7 @@ class App:
     def _prepared(self):
         self._preparing = False
         self.play_btn.state(["!disabled"])
-        self.status.config(text=f"準備完了：{self.score.title}")
+        self.status.config(text=f"準備完了：{self.play_score.title}")
         if self._after_prepared:
             fn, self._after_prepared = self._after_prepared, None
             fn()
@@ -380,7 +443,7 @@ class App:
         if self._preparing:
             return
         self._stop_performer()  # おまかせ連続演奏は続ける
-        self.performer = Performer(self.engine, self.score, self.params)
+        self.performer = Performer(self.engine, self.play_score, self.params)
         self.performer.start()
 
     def _stop(self):
@@ -389,7 +452,7 @@ class App:
         self._end_shuffle()
         self._stop_performer()
         if was_active and not self._preparing:
-            self.status.config(text=f"停止しました：{self.score.title}")
+            self.status.config(text=f"停止しました：{self.play_score.title}")
 
     def _stop_performer(self):
         if self.performer:
@@ -401,7 +464,7 @@ class App:
         if self.shuffle:
             self._stop()
             return
-        presets = [p for p in PRESETS if not (self.skip_plain.get() and p.startswith("機械的"))]
+        presets = [p for p in self._presets() if not (self.skip_plain.get() and p.startswith("機械的"))]
         self.shuffle = ShufflePicker(list(self.catalog), presets)
         self.shuffle_btn.config(text="■ おまかせを終了")
         self.skip_btn.state(["!disabled"])
@@ -441,7 +504,7 @@ class App:
             except Exception:  # noqa: BLE001  読み込めない曲は飛ばす
                 sh.exclude_piece(name)
                 continue
-            if limit and estimate_seconds(score, PRESETS[preset][1].tempo) > limit:
+            if limit and estimate_seconds(score, self._presets()[preset][1].tempo) > limit:
                 sh.exclude_piece(name)
                 continue
             break
@@ -481,7 +544,7 @@ class App:
                 self._paint_key(m, v)
         pf = self.performer
         if pf and not self._preparing:
-            sc = self.score
+            sc = self.play_score
             bar = sc.bar_index(pf.position) + 1
             bpm = pf.bpm_at(pf.position)
             head = f"おまかせ {self.shuffle.count}曲目｜" if self.shuffle else ""
