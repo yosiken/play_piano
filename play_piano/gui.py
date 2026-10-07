@@ -8,7 +8,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from .engine import AudioEngine
+from .engine import LATENCY_CHOICES, AudioEngine, raise_priority
 from .expression import PARAM_INFO, PLUCKED_LABELS, PRESETS, Params, Performer, presets_for
 from .acoustics import ROOMS
 from .arrange import PARTS, arrange, part_family
@@ -158,9 +158,9 @@ class App:
         self.room_box.set(self.engine.room)
         self.room_box.grid(row=1, column=1, padx=(4, 18), pady=(6, 0), sticky="w")
         self.room_box.bind("<<ComboboxSelected>>", lambda e: self._set_room())
-        ttk.Label(sound, text="パート").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(sound, text="パート").grid(row=3, column=0, sticky="w", pady=(6, 0))
         self.part_box = ttk.Combobox(sound, state="disabled", width=30, values=[])
-        self.part_box.grid(row=2, column=1, padx=(4, 18), pady=(6, 0), sticky="w")
+        self.part_box.grid(row=3, column=1, padx=(4, 18), pady=(6, 0), sticky="w")
         self.part_box.bind("<<ComboboxSelected>>", lambda e: self._set_part())
         self.sound_vars = {}
         for i, (attr, label, hi) in enumerate((("wet", "残響の量", 0.8),
@@ -172,6 +172,15 @@ class App:
             ttk.Scale(sound, from_=0, to=hi, variable=var, length=220,
                       command=lambda v, a=attr: setattr(self.engine, a, float(self.sound_vars[a].get()))
                       ).grid(row=i, column=3, padx=(4, 16))
+        ttk.Label(sound, text="音の安定性").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.latency_box = ttk.Combobox(sound, state="readonly", width=30, values=list(LATENCY_CHOICES))
+        self.latency_box.set(next(k for k, v in LATENCY_CHOICES.items() if v == self.engine.latency))
+        self.latency_box.grid(row=2, column=1, padx=(4, 18), pady=(6, 0), sticky="w")
+        self.latency_box.bind("<<ComboboxSelected>>", lambda e: self._set_latency())
+        # 処理が間に合わず音が途切れたときの警告
+        self.underflow_label = ttk.Label(sound, text="", foreground="#b00", wraplength=900)
+        self.underflow_label.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self._underflows_seen = 0
 
         self.kb = tk.Canvas(self.root, height=110, bg="#222", highlightthickness=0)
         self.kb.pack(fill="x", padx=10, pady=10)
@@ -287,6 +296,12 @@ class App:
         parts = PARTS[part_family(family)]
         part = next((k for k, v in parts if v == self.part_box.get()), parts[0][0])
         return arrange(score, family, part)
+
+    def _set_latency(self):
+        """出力バッファの長さを変える。演奏中でも続けられる(一瞬だけ音が止まる)。"""
+        self.engine.restart(LATENCY_CHOICES[self.latency_box.get()])
+        self.engine.underflows = self._underflows_seen = 0
+        self.underflow_label.config(text="")
 
     def _set_room(self):
         self.engine.set_room(self.room_box.get())
@@ -558,8 +573,9 @@ class App:
         while not self._ui_queue.empty():
             self._ui_queue.get()()
         vis = self.engine.visual
-        while vis:
-            ev = vis.popleft()
+        now = self.engine.audible_clock()  # 音が聞こえる時刻に合わせて鍵盤を光らせる
+        while vis and vis[0][0] <= now:
+            ev = vis.popleft()[1]
             if ev[0] == "pedal":
                 self.kb.itemconfig(self._pedal_item, text="● ペダル" if ev[1] else "")
             elif ev[0] == "all_off":
@@ -574,6 +590,12 @@ class App:
                 else:
                     self.pressed.pop(m, None)
                 self._paint_key(m, v)
+        if self.engine.underflows > self._underflows_seen:
+            self._underflows_seen = self.engine.underflows
+            hint = ("「音の安定性」を上げるか、" if self.engine.latency < max(LATENCY_CHOICES.values()) else "")
+            self.underflow_label.config(
+                text=f"⚠ 処理が追いつかず音が途切れました（{self._underflows_seen}回）。"
+                     f"{hint}ほかの重いアプリを閉じてください。")
         pf = self.performer
         if pf and not self._preparing:
             sc = self.play_score
@@ -600,6 +622,7 @@ class App:
 
 
 def run():
+    raise_priority()
     root = tk.Tk()
     try:
         ttk.Style().theme_use("vista")

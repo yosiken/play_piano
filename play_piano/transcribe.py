@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from typing import Callable
 
 from .score import CATALOG_PATH, PIECES_DIR
@@ -63,6 +64,12 @@ def seconds(t: str | None) -> float | None:
     return sec
 
 
+class CommandError(RuntimeError):
+    def __init__(self, msg: str, output: str):
+        super().__init__(msg)
+        self.output = output
+
+
 def _run(cmd: list[str], log: Log) -> str:
     """コマンドを実行し、出力を1行ずつ log に流す。戻り値: 全出力"""
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # GUIから呼んだとき黒い窓を出さない
@@ -74,12 +81,13 @@ def _run(cmd: list[str], log: Log) -> str:
         if line.strip():
             log(line.rstrip())
     if p.wait():
-        msg = f"{cmd[0]} が失敗しました:\n" + "".join(out[-8:])
-        if cmd[0] == "yt-dlp" and "HTTP Error 403" in msg:
-            msg += ("\nyt-dlp が古いと YouTube に拒否されます。次のコマンドで更新してから、もう一度試してください:\n"
-                    "winget upgrade yt-dlp.yt-dlp（pip で入れた場合は pip install -U yt-dlp）")
-        raise RuntimeError(msg)
+        raise CommandError(f"{cmd[0]} が失敗しました:\n" + "".join(out[-8:]), "".join(out))
     return "".join(out)
+
+
+# YouTube はダウンロードを時々 403 で拒否する(確認用の PO Token が無い取得をランダムに断る)。
+# 失敗したら取得方法(player_client)を変えて取り直す。None は yt-dlp の標準。
+_CLIENT_TRIES = (None, "web_embedded", None, "web_embedded")
 
 
 def download_audio(url: str, log: Log = _echo) -> tuple[str, str]:
@@ -95,8 +103,25 @@ def download_audio(url: str, log: Log = _echo) -> tuple[str, str]:
     path = os.path.join(CACHE_DIR, f"{info['id']}.wav")
     if not os.path.exists(path):
         log(f"音声をダウンロード中: {info.get('title', url)}")
-        _run(["yt-dlp", "--no-playlist", "--newline", "-x", "--audio-format", "wav",
-              "-o", os.path.join(CACHE_DIR, "%(id)s.%(ext)s"), url], log)
+        for i, client in enumerate(_CLIENT_TRIES):
+            cmd = ["yt-dlp", "--no-playlist", "--newline", "--no-continue", "-x", "--audio-format", "wav",
+                   "-o", os.path.join(CACHE_DIR, "%(id)s.%(ext)s")]
+            if client:
+                cmd += ["--extractor-args", f"youtube:player_client={client}"]
+            try:
+                _run(cmd + [url], log)
+                break
+            except CommandError as e:
+                if "HTTP Error 403" not in e.output:
+                    raise
+                if i + 1 == len(_CLIENT_TRIES):
+                    raise RuntimeError(
+                        f"{e}\nYouTube にダウンロードを拒否されました（取得方法を変えて{len(_CLIENT_TRIES)}回試しました）。\n"
+                        "時間をおいてもう一度試してください。続く場合は、yt-dlp の開発版で直っていることがあります:\n"
+                        "yt-dlp --update-to nightly"
+                    ) from None
+                log(f"YouTube に拒否されました(403)。取得方法を変えて再試行します（{i + 2}/{len(_CLIENT_TRIES)}）…")
+                time.sleep(2)
     return path, info.get("title", info["id"])
 
 

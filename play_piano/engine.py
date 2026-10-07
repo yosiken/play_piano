@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import heapq
 import itertools
+import sys
 import threading
 from collections import deque
 
@@ -64,22 +65,33 @@ class _Voice:
         return out
 
 
-def _noise_samples():
+def _noise_samples(variants: int = 6):
+    """合成ピアノ用の機械ノイズ。種類ごとに少しずつ違う波形を何本か作る。
+
+    同じ波形を同時に重ねると振幅が足し算で大きくなりクリックになるので、毎回ランダムに選ぶ。
+    鳴り始めは数msかけて立ち上げる(いきなり最大振幅で始めると「プチッ」と聞こえる)。
+    """
     rng = np.random.default_rng(11)
 
-    def burst(dur, tau, lp, hp=0):
+    def burst(dur, attack, tau, lp, hp=0):
         n = int(SR * dur)
         x = rng.standard_normal(n)
         spec = np.fft.rfft(x)
         f = np.fft.rfftfreq(n, 1 / SR)
-        spec *= 1 / (1 + (f / lp) ** 2) * (1 / (1 + (hp / np.maximum(f, 1)) ** 2) if hp else 1)
-        y = np.fft.irfft(spec, n) * np.exp(-np.arange(n) / (SR * tau))
+        spec *= 1 / (1 + (f / lp) ** 4) * (1 / (1 + (hp / np.maximum(f, 1)) ** 2) if hp else 1)
+        t = np.arange(n) / SR
+        rise = np.minimum(t / attack, 1.0)
+        env = (0.5 - 0.5 * np.cos(np.pi * rise)) * np.exp(-np.maximum(t - attack, 0) / tau)
+        y = np.fft.irfft(spec, n) * env
         return y / np.abs(y).max()
 
     return {
-        "damper": burst(0.06, 0.012, 900, 80) * 0.010,   # ダンパーのフェルトが弦に触れる音
-        "pedal_down": burst(0.15, 0.03, 400, 40) * 0.020,  # ペダルを踏む音
-        "pedal_up": burst(0.25, 0.06, 1800, 150) * 0.012,  # ダンパーが一斉に戻る音
+        # ダンパーのフェルトが弦に触れる音
+        "damper": [burst(0.08, 0.004, 0.015, 700, 80) * 0.006 for _ in range(variants)],
+        # ペダルを踏む音
+        "pedal_down": [burst(0.18, 0.006, 0.03, 400, 40) * 0.016 for _ in range(variants)],
+        # ダンパーが一斉に戻る音
+        "pedal_up": [burst(0.25, 0.008, 0.05, 1200, 120) * 0.010 for _ in range(variants)],
     }
 
 
@@ -112,9 +124,11 @@ class AudioEngine:
         self.wet = 0.0
         self._rev_conv = None
         self.set_room(room)
-        # GUI表示用 (note, vel) / ('pedal', bool)
+        # GUI表示用 (鳴るサンプル時刻, 内容)。内容は (note, vel) / ('pedal', bool) / ('all_off', None)
         self.visual: deque = deque(maxlen=4096)
         self._stream = None
+        self.latency = 0.25   # 出力バッファの長さ[s]
+        self.underflows = 0   # 処理が間に合わず音が途切れた回数
 
     @property
     def plucked(self) -> bool:
@@ -165,7 +179,9 @@ class AudioEngine:
     # ---- イベント処理 ----
     def _oneshot(self, name, gain, offset=0):
         if self.noise > 0:
-            self.oneshots.append([self._noises[name], -offset, gain * self.noise])
+            waves = self._noises[name]
+            wave = waves[int(self._rand.integers(len(waves)))]
+            self.oneshots.append([wave, -offset, gain * self.noise])
 
     def _note_on(self, note, vel, offset, inst=""):
         if not 21 <= note <= 108 or vel <= 0:
@@ -183,13 +199,15 @@ class AudioEngine:
             low, high = self._bank_for(inst).get(note)
             voice = _Voice(note, low, high, offset, vel, inst)
         self.voices.append(voice)
-        self.visual.append((note, vel))
+        self.visual.append((self.clock + offset, (note, vel)))
 
     def _damper_sound(self, v, offset):
         """ダンパーが下りる音。サンプル音源では録音された弦の余韻とハンマー音を使う。"""
         if self.sampler is None:
+            # 和音を一斉に離したときに同じ瞬間に重ならないよう、0〜4msずらす
+            jitter = int(self._rand.integers(0, int(0.004 * SR)))
             # ギター・ベースでは指で弦を押さえて止める、小さな音
-            self._oneshot("damper", (0.4 + v.vel / 127) * (0.5 if self.plucked else 1.0), offset)
+            self._oneshot("damper", (0.4 + v.vel / 127) * (0.5 if self.plucked else 1.0), offset + jitter)
             return
         held = max(0.0, (self.clock + offset - v.t_on) / SR)
         for z in self.sampler.find_release(v.note, v.vel):
@@ -198,7 +216,7 @@ class AudioEngine:
             if gain > 1e-3:
                 self.shots.append(SampleVoice(v.note, z, offset, v.vel, gain))
 
-    def _pedal_sound(self, down, offset):
+    def _pedal_sound(self, down, offset, ringing: int = 0):
         if self.plucked:
             return
         zones = (self.sampler.pedal_down if down else self.sampler.pedal_up) if self.sampler else []
@@ -206,7 +224,9 @@ class AudioEngine:
             z = zones[int(self._rand.integers(len(zones)))]
             self.shots.append(SampleVoice(z.center, z, offset, 100, SAMPLE_GAIN * self.noise))
         else:
-            self._oneshot("pedal_down" if down else "pedal_up", 1.0, offset)
+            # 合成ピアノ: 鳴っていた弦が多いほど、ダンパーが戻る音を少し大きく
+            gain = 1.0 if down else min(1.6, 0.7 + 0.15 * np.sqrt(ringing))
+            self._oneshot("pedal_down" if down else "pedal_up", gain, offset)
 
     def _note_off(self, note, offset, inst=""):
         for v in self.voices:
@@ -214,7 +234,7 @@ class AudioEngine:
                 v.key_down = False
                 if not self.pedal_down and note < NO_DAMPER_FROM:
                     self._damper_sound(v, offset)
-        self.visual.append((note, 0))
+        self.visual.append((self.clock + offset, (note, 0)))
 
     def _apply(self, kind, args, offset):
         if kind == "on":
@@ -224,15 +244,18 @@ class AudioEngine:
         elif kind == "pedal":
             down = bool(args[0])
             if down != self.pedal_down:
-                self._pedal_sound(down, offset)
-                if not down:
-                    # ペダルを離すと、指を離していた音のダンパーが一斉に下りる
-                    held = [v for v in self.voices if not v.key_down and not v.fast_damp and v.note < NO_DAMPER_FROM]
+                held = [] if down else [v for v in self.voices
+                                        if not v.key_down and not v.fast_damp and v.note < NO_DAMPER_FROM]
+                self._pedal_sound(down, offset, len(held))
+                # ペダルを離すと、指を離していた音のダンパーが一斉に下りる。
+                # サンプル音源では録音された弦の余韻を鳴らす。合成ピアノでは上のペダル音1つで表す
+                # (同じ音を同時にいくつも重ねるとクリックになる)
+                if self.sampler is not None:
                     held.sort(key=lambda v: -v.level * v.amp)
                     for v in held[:12]:
                         self._damper_sound(v, offset)
             self.pedal_down = down
-            self.visual.append(("pedal", down))
+            self.visual.append((self.clock + offset, ("pedal", down)))
         elif kind == "pedal_depth":
             self.pedal_depth = float(args[0])
         elif kind == "all_off":
@@ -241,7 +264,7 @@ class AudioEngine:
                 v.fast_damp = True
             self.pedal_down = False
             self.shots.clear()
-            self.visual.append(("all_off", None))
+            self.visual.append((self.clock + offset, ("all_off", None)))
 
     # ---- 合成 ----
     def render(self, frames: int) -> np.ndarray:
@@ -362,24 +385,64 @@ class AudioEngine:
         return np.clip(x, -1.0, 1.0)
 
     # ---- リアルタイム出力 ----
-    def start(self) -> None:
+    def start(self, latency: float | None = None) -> None:
+        """音声出力を始める。latency は出力バッファの長さ[s]。
+
+        楽譜を先読みして鳴らすので、長くしても演奏のタイミングはずれない
+        (停止やスライダーの反映がそのぶん遅れるだけ)。ほかのアプリが重いときは長くすると途切れにくい。
+        """
         import sounddevice as sd
 
+        if latency:
+            self.latency = latency
         if self._stream is not None:
             return
 
         def cb(outdata, frames, time_info, status):
+            if status.output_underflow:
+                self.underflows += 1  # 処理が間に合わず音が途切れた
             outdata[:] = self.render(frames).astype(np.float32)
 
         self._stream = sd.OutputStream(samplerate=SR, channels=2, blocksize=BLOCK,
-                                       dtype="float32", latency=0.25, callback=cb)  # 先読み再生なので遅延より安定を優先
+                                       dtype="float32", latency=self.latency, callback=cb)
         self._stream.start()
+
+    def audible_clock(self) -> int:
+        """いまスピーカーから聞こえているサンプル時刻(出力バッファのぶん clock より遅れる)。"""
+        if self._stream is None:
+            return self.clock
+        return self.clock - int(self._stream.latency * SR) - BLOCK
+
+    def restart(self, latency: float) -> None:
+        """出力バッファの長さを変えて出力し直す(演奏は続く。一瞬だけ音が止まる)。"""
+        self.close()
+        self.start(latency)
 
     def close(self) -> None:
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+
+
+LATENCY_CHOICES = {"標準（0.25秒）": 0.25, "安定重視（0.5秒）": 0.5, "最大（1秒）": 1.0}
+
+
+def raise_priority() -> None:
+    """Windows でこのアプリの優先度を「通常以上」にし、ほかのアプリに処理を取られにくくする。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.windll.kernel32
+        # 64bit ではハンドルを int のまま渡すと壊れるので型を指定する
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        k32.SetPriorityClass(k32.GetCurrentProcess(), 0x00008000)  # ABOVE_NORMAL_PRIORITY_CLASS
+    except Exception:  # noqa: BLE001  優先度を変えられなくても動作には困らない
+        pass
 
 
 def _load_resonance():
