@@ -32,11 +32,12 @@ SAMPLE_GAIN = 1.6  # サンプル音源の音量を合成音とそろえる係�
 
 class _Voice:
     __slots__ = ("note", "low", "high", "pos", "amp", "bright", "gains", "delays",
-                 "key_down", "level", "fast_damp", "vel", "inst")
+                 "key_down", "level", "fast_damp", "vel", "inst", "amped")
 
     def __init__(self, note, low, high, offset, vel, inst=""):
         self.note = note
         self.inst = inst
+        self.amped = False  # ギターアンプを通す(エレキギターの歪み)
         self.low = low
         self.high = high
         self.pos = -offset  # ブロック先頭での音の内部位置(負 = まだ鳴っていない)
@@ -95,6 +96,35 @@ def _noise_samples(variants: int = 6):
     }
 
 
+class Amp:
+    """エレキギターのアンプ: 低音を少し削ってから歪ませ、スピーカー(キャビネット)の特性を通す。
+
+    歪みは音を足し合わせてから掛ける(和音の音同士が混ざり合う濁りが、歪んだギターらしさになる)。
+    """
+
+    def __init__(self, drive: float):
+        from scipy.signal import butter
+
+        self.drive = drive
+        self.gain = 6.0 + 30.0 * drive
+        self.pre = butter(2, 140, "highpass", fs=SR, output="sos")
+        self.cab = np.vstack([butter(4, 4200, "lowpass", fs=SR, output="sos"),
+                              butter(1, 80, "highpass", fs=SR, output="sos")])
+        self.zpre = np.zeros((len(self.pre), 2))
+        self.zcab = np.zeros((len(self.cab), 2))
+        # 歪ませると音量がそろうので、ほかの楽器と釣り合う大きさに下げる
+        self.level = 0.22
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        from scipy.signal import sosfilt
+
+        y, self.zpre = sosfilt(self.pre, x, zi=self.zpre)
+        bias = 0.15  # 少し非対称に歪ませる(真空管アンプらしい偶数倍音)
+        y = np.tanh(self.gain * y + bias) - np.tanh(bias)
+        y, self.zcab = sosfilt(self.cab, y, zi=self.zcab)
+        return y * self.level
+
+
 class AudioEngine:
     def __init__(self, bank: NoteBank | StringBank | None = None, max_voices: int = 96,
                  room: str = "コンサートホール", sampler: SFZBank | None = None):
@@ -102,6 +132,7 @@ class AudioEngine:
         self.sampler = sampler  # None なら合成音
         # 合奏で使う、ほかの楽器の合成音(楽器のキー → StringBank)
         self.extra_banks: dict[str, StringBank] = {}
+        self._amp: Amp | None = None  # エレキギターのアンプ(歪ませる音源を鳴らしたときに作る)
         self.shots: list[SampleVoice] = []  # 録音されたリリース音・ペダル音
         self._rand = np.random.default_rng(0)
         self.max_voices = max_voices
@@ -149,6 +180,9 @@ class AudioEngine:
             by_inst.setdefault(n.inst, []).append(n.pitch)
         for inst, pitches in by_inst.items():
             bank = self._bank_for(inst)
+            drive = getattr(getattr(bank, "spec", None), "drive", 0.0)
+            if drive and (self._amp is None or self._amp.drive != drive):
+                self._amp = Amp(drive)  # 音を鳴らすスレッドでなく、ここで作っておく(scipy の読み込みが重い)
             if bank is self.bank:
                 self.prepare(pitches, progress)
             else:
@@ -196,8 +230,14 @@ class AudioEngine:
             voice = SampleVoice(note, self.sampler.find(note, vel), offset, vel, SAMPLE_GAIN)
             voice.t_on = self.clock + offset
         else:
-            low, high = self._bank_for(inst).get(note)
+            bank = self._bank_for(inst)
+            low, high = bank.get(note)
             voice = _Voice(note, low, high, offset, vel, inst)
+            drive = getattr(getattr(bank, "spec", None), "drive", 0.0)
+            if drive:
+                voice.amped = True
+                if self._amp is None or self._amp.drive != drive:
+                    self._amp = Amp(drive)
         self.voices.append(voice)
         self.visual.append((self.clock + offset, (note, vel)))
 
@@ -277,6 +317,7 @@ class AudioEngine:
             self._apply(kind, args, max(0, t - self.clock))
 
         dry = np.zeros((frames, 2))
+        amp_in = np.zeros(frames) if self._amp is not None else None  # アンプに入れる音(モノラル)
         ramp = np.arange(frames)
         alive = []
         for v in self.voices:
@@ -312,6 +353,12 @@ class AudioEngine:
                     alive.append(v)
                 continue
             q = max(0, v.pos)
+            if v.amped and amp_in is not None:
+                amp_in[start:] += v.read(q, n) * (env * v.amp)
+                v.pos = q + n
+                if v.level > 1e-4 and v.pos < len(v.low):
+                    alive.append(v)
+                continue
             for ch in range(2):
                 d = v.delays[ch]
                 dry[start:, ch] += v.read(q - d, n) * (env * v.amp * v.gains[ch])
@@ -335,6 +382,9 @@ class AudioEngine:
             if v.pos < v.length:
                 keep.append(v)
         self.shots = keep[-48:]
+
+        if amp_in is not None:
+            dry += self._amp.process(amp_in)[:, None]
 
         mono = dry.mean(axis=1)
 

@@ -147,6 +147,15 @@ GUITAR_PRESETS: dict[str, tuple[str, Params]] = {
         "控えめな音量で、和音はさっと揃えて柔らかく。音を伸ばしすぎず、落ち着いた語り口。",
         Params(0.92, 0.3, 0.1, -4, 16, 10, 5, 2, 0.0, 6, 12, 4, 1.0, 0.4, 0.5, 0.0),
     ),
+    "ロック・ギター風（歪みでかき鳴らす）": (
+        "一定のテンポで拍頭を強く、短めに切って刻む。ディストーションのパワーコードに合う。",
+        #      tempo rub   drift lvl rng mel bas acc sur  lead roll jit leg  ped  rit  up
+        Params(1.04, 0.05, 0.03, 4, 14, 8, 8, 12, 0.1, 0, 10, 3, 0.85, 0.2, 0.25, 0.5),
+    ),
+    "ブルース風（泣きのリード）": (
+        "メロディを強く歌わせ、たっぷり伸ばす。フレーズの終わりでぐっと溜める。",
+        Params(0.92, 0.55, 0.15, 2, 28, 16, 5, 4, 0.1, 15, 15, 6, 1.12, 0.7, 0.7, 0.2),
+    ),
     "ボサノヴァ風（ささやくように）": (
         "小さな音で淡々と。和音は短く切り、ベースを親指で軽く弾く。",
         Params(0.9, 0.2, 0.05, -6, 12, 8, 8, 4, 0.0, 10, 8, 3, 0.8, 0.5, 0.4, 0.0),
@@ -179,12 +188,24 @@ BASS_PRESETS: dict[str, tuple[str, Params]] = {
 
 
 def presets_for(instrument: str) -> dict[str, tuple[str, Params]]:
-    """楽器(piano / nylon / steel / bass)に合う奏者のプリセット。"""
+    """楽器(piano / nylon / steel / electric / drive / bass / band_*)に合う奏者のプリセット。"""
     if instrument == "bass":
         return BASS_PRESETS
-    if instrument in ("nylon", "steel") or instrument.startswith("band_"):
+    if instrument in ("nylon", "steel", "electric", "drive") or instrument.startswith("band_"):
         return GUITAR_PRESETS
     return PRESETS
+
+
+def default_preset(instrument: str) -> str:
+    """楽器を選んだときに最初に選ぶ奏者。"""
+    guitar = instrument.removeprefix("band_")
+    if guitar == "drive":
+        return "ロック・ギター風（歪みでかき鳴らす）"
+    if guitar == "electric":
+        return "ジャズ・ギター風（柔らかく端正）"
+    if instrument == "piano":
+        return "ルービンシュタイン風（気品ある歌）"
+    return list(presets_for(instrument))[1]  # 「機械的」の次
 
 
 def _smoothstep(a, b, x):

@@ -6,6 +6,7 @@
   python main.py --render out.wav --piece elise --instrument nylon --preset クラシック
   python main.py --render out.wav --piece korobeiniki --instrument bass --part bass8
   python main.py --render out.wav --piece korobeiniki --instrument band_steel
+  python main.py --render out.wav --piece korobeiniki --instrument band_drive --part power --preset ロック
 """
 from __future__ import annotations
 
@@ -17,7 +18,8 @@ import wave
 import numpy as np
 
 
-PLUCKED = ("nylon", "steel", "bass", "band_steel", "band_nylon")
+PLUCKED = ("nylon", "steel", "electric", "drive", "bass",
+           "band_steel", "band_nylon", "band_electric", "band_drive")
 
 
 def _find_preset(name: str, instrument: str = "piano"):
@@ -51,7 +53,7 @@ def make_engine(instrument: str):
 
 
 def render(path: str, piece: str, preset: str | None, seed: int, instrument: str, part: str | None) -> None:
-    from play_piano.expression import Performer, presets_for
+    from play_piano.expression import Performer, default_preset
     from play_piano.synth import SR
 
     score = _load_score(piece)
@@ -60,8 +62,7 @@ def render(path: str, piece: str, preset: str | None, seed: int, instrument: str
         from play_piano.arrange import arrange, instrument_name
 
         score = arrange(score, instrument, part)
-    # 既定の奏者: ピアノはルービンシュタイン風、ギター・ベースは2番目(「機械的」の次)
-    preset = preset or ("ルービンシュタイン" if family == "piano" else list(presets_for(family))[1])
+    preset = preset or default_preset(family)
     key, params = _find_preset(preset, family)
     print(f"{score.title} / {key} を書き出し中...")
     engine = make_engine(instrument)
@@ -89,10 +90,11 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--instrument", choices=("sample", "synth") + PLUCKED, default="sample",
                     help="sample: sounds/ のSFZ音源(無ければ合成), synth: 合成ピアノ, "
-                         "nylon: クラシックギター, steel: アコースティックギター, bass: エレキベース, "
-                         "band_steel / band_nylon: ギター＋ベースの合奏")
-    ap.add_argument("--part", help="ギター: full / melody、ベース: bass / bass8 / melody、"
-                                   "合奏: full / full8 / backing")
+                         "nylon: クラシックギター, steel: アコースティックギター, "
+                         "electric: エレキギター(クリーン), drive: エレキギター(ディストーション), bass: エレキベース, "
+                         "band_steel / band_nylon / band_electric / band_drive: ギター＋ベースの合奏")
+    ap.add_argument("--part", help="ギター: full / melody、エレキギター: full / power / melody、"
+                                   "ベース: bass / bass8 / melody、合奏: full / full8 / backing / power")
     ap.add_argument("--list", action="store_true")
     args = ap.parse_args()
 

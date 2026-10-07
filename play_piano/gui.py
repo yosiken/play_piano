@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from .engine import LATENCY_CHOICES, AudioEngine, raise_priority
-from .expression import PARAM_INFO, PLUCKED_LABELS, PRESETS, Params, Performer, presets_for
+from .expression import PARAM_INFO, PLUCKED_LABELS, PRESETS, Params, Performer, default_preset, presets_for
 from .acoustics import ROOMS
 from .arrange import PARTS, arrange, part_family
 from .sampler import SFZBank, find_sfz
@@ -40,8 +40,8 @@ class App:
                 print("SFZの読み込みに失敗:", e)
         # ギター・ベース(合成)。ピアノの楽譜を編曲して弾く
         self.string_banks = {kind: StringBank(kind) for kind in SPECS}
-        for kind, bank in self.string_banks.items():
-            self.instruments[bank.name] = bank
+        for kind in sorted(self.string_banks, key=lambda k: k == "bass"):  # ギター類 → ベース の順に並べる
+            self.instruments[self.string_banks[kind].name] = self.string_banks[kind]
         # ギター＋ベースの合奏(値は BANDS のキー)
         for key, (_, name) in BANDS.items():
             self.instruments[name] = key
@@ -222,7 +222,7 @@ class App:
 
     # ---- 操作 ----
     def _family(self) -> str:
-        """いま選んでいる楽器: piano / nylon / steel / bass"""
+        """いま選んでいる楽器: piano / SPECS のキー(nylon など) / BANDS のキー(band_steel など)"""
         inst = self.instruments[self.inst_box.get()]
         if isinstance(inst, StringBank):
             return inst.kind
@@ -257,6 +257,7 @@ class App:
     def _set_instrument(self):
         self._stop()
         old_presets = list(self.preset_box.cget("values"))
+        old_default = getattr(self, "_default_preset", None)
         inst = self.instruments[self.inst_box.get()]
         if isinstance(inst, StringBank):
             self.engine.sampler = None
@@ -273,11 +274,13 @@ class App:
         if new_parts != list(self.part_box.cget("values")):
             self.part_box.config(values=new_parts, state="readonly" if new_parts else "disabled")
             self.part_box.set(new_parts[0] if new_parts else "")
-        if presets != old_presets:  # ピアノ ⇔ ギター ⇔ ベース を切り替えた
+        # 楽器が変わったら、その楽器に合う奏者を選び直す(アコギ → エレキ など、一覧が同じときも)
+        self._default_preset = default = default_preset(family)
+        if presets != old_presets or default != old_default:
             self.preset_box.config(values=presets)
-            default = "ルービンシュタイン風（気品ある歌）" if family == "piano" else presets[1]
             self.preset_box.set(default)
             self._apply_preset(default)
+        if presets != old_presets:  # ピアノ ⇔ ギター ⇔ ベース を切り替えた
             self.player_label.config(text={"piano": "ピアニスト", "bass": "ベーシスト"}.get(family, "ギタリスト"))
             for name, label, _, _ in PARAM_INFO:
                 text = PLUCKED_LABELS.get(name, label) if family != "piano" else label

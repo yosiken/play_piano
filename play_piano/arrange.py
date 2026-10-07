@@ -16,9 +16,10 @@ GUITAR_STRINGS = 6
 # 楽器 → 選べるパート (キー, 表示名)
 PARTS = {
     "guitar": [("full", "メロディ＋伴奏"), ("melody", "メロディだけ")],
+    "electric": [("full", "メロディ＋伴奏"), ("power", "パワーコード（ルート＋5度）"), ("melody", "メロディ（リード）")],
     "bass": [("bass", "ベースライン"), ("bass8", "ベースライン（8分で刻む）"), ("melody", "メロディ")],
     "band": [("full", "メロディ＋伴奏＋ベース"), ("full8", "メロディ＋伴奏＋ベース（8分で刻む）"),
-             ("backing", "伴奏＋ベース（メロディなし）")],
+             ("backing", "伴奏＋ベース（メロディなし）"), ("power", "パワーコード＋ベース")],
 }
 
 
@@ -26,6 +27,8 @@ def part_family(instrument: str) -> str:
     """楽器のキー → PARTS のキー"""
     if instrument in BANDS:
         return "band"
+    if instrument in ("electric", "drive"):
+        return "electric"
     return "bass" if instrument == "bass" else "guitar"
 
 
@@ -135,6 +138,16 @@ def _guitar_full(score: Score, lo: int, hi: int) -> list[Note]:
     return out
 
 
+def _power_chords(score: Score, lo: int) -> list[Note]:
+    """バスの声部を根音にした「パワーコード」(根音・5度上・オクターブ上)。歪ませても濁りにくい。"""
+    out = []
+    for n in _bass_line(score, lo, lo + 11):
+        out.append(n)
+        for iv in (7, 12):
+            out.append(Note(n.start, n.dur, n.pitch + iv, "inner", n.vel_hint, n.track))
+    return out
+
+
 def _band(score: Score, guitar: str, part: str) -> list[Note]:
     bs = SPECS["bass"]
     bass = _bass_line(score, bs.lo, bs.lo + 24)
@@ -144,7 +157,10 @@ def _band(score: Score, guitar: str, part: str) -> list[Note]:
     skip = {"bass"} if part != "backing" else {"bass", "melody"}
     rest = [n for n in score.notes if n.role not in skip]
     gs = SPECS[guitar]
-    gtr = _guitar_full(_copy(score, rest, score.title), gs.lo, gs.hi) if rest else []
+    if part == "power":
+        gtr = _power_chords(score, gs.lo)
+    else:
+        gtr = _guitar_full(_copy(score, rest, score.title), gs.lo, gs.hi) if rest else []
     for n in bass:
         n.inst = "bass"
     for n in gtr:
@@ -153,7 +169,8 @@ def _band(score: Score, guitar: str, part: str) -> list[Note]:
 
 
 def arrange(score: Score, instrument: str, part: str | None = None) -> Score:
-    """instrument: "nylon" / "steel" / "bass"(strings.SPECS のキー)、または "band_steel" などの合奏"""
+    """instrument: strings.SPECS のキー(nylon / steel / electric / drive / bass)、
+    または strings.BANDS のキー(band_steel などの合奏)"""
     family = part_family(instrument)
     part = part or PARTS[family][0][0]
     label = dict(PARTS[family])[part]
@@ -173,6 +190,8 @@ def arrange(score: Score, instrument: str, part: str | None = None) -> Score:
                 notes = _eighths(notes)
     elif part == "melody":
         notes = _melody_line(score, lo + 12, hi)
+    elif part == "power":
+        notes = _power_chords(score, lo)
     else:
         notes = _guitar_full(score, lo, hi)
     if not notes:

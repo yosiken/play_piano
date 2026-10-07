@@ -42,6 +42,7 @@ class StringSpec:
     click: float        # ピック・爪が弦に当たる音の大きさ
     max_seconds: float
     gain: float = 1.0   # 音量(単音で弾くベースは少し大きく)
+    drive: float = 0.0  # アンプの歪みの強さ(0 なら歪ませない。engine の Amp で、鳴っている音をまとめて歪ませる)
 
 
 SPECS: dict[str, StringSpec] = {
@@ -59,12 +60,23 @@ SPECS: dict[str, StringSpec] = {
         "エレキベース", lo=28, hi=67, pluck=0.1, soft_fc=500, hard_fc=2200,
         tau_low=3.2, tau_oct=0.6, loss1=1.4e-3, loss2=6e-7, B=1.2e-4, attack=0.0018,
         body=(), pickup=0.22, amp_fc=4500, click=0.15, max_seconds=8.0, gain=1.6),
+    # エレキギター: 胴が鳴らない(ソリッドボディ)ので減衰が遅く、ピックアップで拾う
+    "electric": StringSpec(
+        "エレキギター（クリーン）", lo=40, hi=88, pluck=0.12, soft_fc=1300, hard_fc=4800,
+        tau_low=5.5, tau_oct=0.62, loss1=4e-4, loss2=1.5e-7, B=3e-5, attack=0.0008,
+        body=(), pickup=0.24, amp_fc=5500, click=0.3, max_seconds=9.0, gain=0.9),  # フロント寄りのピックアップ
+    "drive": StringSpec(
+        "エレキギター（ディストーション）", lo=40, hi=88, pluck=0.12, soft_fc=1600, hard_fc=5000,
+        tau_low=5.5, tau_oct=0.62, loss1=4e-4, loss2=1.5e-7, B=3e-5, attack=0.0008,
+        body=(), pickup=0.09, amp_fc=5000, click=0.3, max_seconds=9.0, drive=1.0),  # リア(駒側)のピックアップ
 }
 
 # ギター＋ベースの合奏: キー → (ギターの種類, 表示名)
 BANDS = {
     "band_steel": ("steel", "ギター＋ベース（アコースティック）"),
     "band_nylon": ("nylon", "ギター＋ベース（クラシック）"),
+    "band_electric": ("electric", "エレキギター＋ベース（クリーン）"),
+    "band_drive": ("drive", "エレキギター＋ベース（ロック）"),
 }
 
 # 鳴らす強さの目安: 強くはじいた音の最初の0.5秒の実効値(合成ピアノと同じくらいの音量にそろえる)
