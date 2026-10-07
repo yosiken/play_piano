@@ -121,6 +121,34 @@ python transcribe.py recording.wav --name my_piece
 - ピアノソロの録音ほど正確です。テンポ情報は入らないため、拍の位置は MIDI の小節線とずれます。
 - YouTube の動画は、ダウンロードが認められているもの（自分の演奏など）に使い、作った MIDI は個人の練習用にとどめてください。
 
+#### ギター・ベースの採譜
+
+ギターやベースの演奏からも MIDI を作れます。ピアノ用のモデルは使わず、次の2段階で変換します。
+
+1. **音源分離**：Meta の [Demucs](https://github.com/facebookresearch/demucs) で、バンド演奏からギター（`htdemucs_6s`）やベース（`htdemucs`）の音だけを取り出す
+2. **採譜**：Spotify の [Basic Pitch](https://github.com/spotify/basic-pitch)（楽器を問わない採譜モデル）で MIDI にする
+
+GUI では「URLから採譜…」の「採譜する楽器」でギターかベースを選びます。その楽器だけの録音なら、「音源分離」のチェックを外すと速く、正確になります。
+MIDI は `pieces/youtube/<曲名>_guitar.mid`（ベースは `_bass.mid`）に保存され、曲名に（ギター）（ベース）が付きます。
+「音源」でギターやベースを選んで演奏してください。
+
+```
+python transcribe.py https://youtu.be/XXXX --instrument guitar             # バンド演奏からギターを採譜
+python transcribe.py https://youtu.be/XXXX --instrument bass --start 0:12  # ベース
+python transcribe.py bass_solo.wav --instrument bass --no-split            # ベースだけの録音（音源分離しない）
+```
+
+- 必要なもの（Python 3.12 以降では、basic-pitch の依存関係に古い TensorFlow が指定されていて入らないので、`--no-deps` で入れます）:
+
+  ```
+  pip install basic-pitch --no-deps
+  pip install onnxruntime pretty_midi "resampy<0.4.3" mir_eval scikit-learn librosa soundfile "setuptools<81"
+  pip install demucs        # 音源分離を使う場合（torch も必要。ピアノの採譜と同じものでよい）
+  ```
+
+- Demucs のモデル（数十〜百MB）は、初回の変換で自動的にダウンロードされます。分離は GPU があれば速く、CPU では曲の長さと同じくらいかかります
+- ギターは和音や速いフレーズほど誤りが増えます。ベースは単音として整理します（同時に鳴った音は強いほうだけを残す）
+
 ## 音づくり
 
 ### 録音ピアノ（Salamander）

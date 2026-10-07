@@ -1,6 +1,8 @@
-"""ピアノ演奏の録音（YouTube などのURL または音声ファイル）を自動採譜して MIDI にする。
+"""演奏の録音（YouTube などのURL または音声ファイル）を自動採譜して MIDI にする。
 
-採譜には ByteDance の piano_transcription_inference（ピアノ専用。ペダルも推定）を使う。
+ピアノ: ByteDance の piano_transcription_inference（ピアノ専用。ペダルも推定）
+ギター・ベース: Meta の Demucs でバンド演奏からその楽器の音だけを取り出し（音源分離）、
+               Spotify の Basic Pitch（楽器を問わない採譜モデル）で MIDI にする
 MIDI は pieces/<保存先>/ に保存し、pieces/catalog.toml に1ファイルの組曲として追記する。
 CLI（ルートの transcribe.py）と GUI の両方から使う。
 """
@@ -23,6 +25,16 @@ DEFAULT_SUBDIR = "youtube"
 
 Log = Callable[[str], None]
 _model = None  # 読み込んだ採譜モデル（2回目以降の変換で使い回す）
+_demucs: dict = {}  # 音源分離のモデル（名前 → モデル）
+
+# 採譜する楽器: 表示名、Demucs のモデルと取り出すパート、音域[Hz]、MIDIの音色番号、ファイル名の末尾
+INSTRUMENTS = {
+    "piano": dict(label="ピアノ"),
+    "guitar": dict(label="ギター", model="htdemucs_6s", stem="guitar", fmin=75.0, fmax=1400.0,
+                   program=25, suffix="_guitar"),
+    "bass": dict(label="ベース", model="htdemucs", stem="bass", fmin=38.0, fmax=420.0,
+                 program=33, suffix="_bass"),
+}
 
 
 def _echo(msg: str) -> None:
@@ -124,6 +136,102 @@ def transcribe_audio(audio_path: str, midi_path: str, start: float | None = None
         _model.transcribe(audio, midi_path)
 
 
+def _load_clip(audio_path: str, sr: int, mono: bool, start: float | None, end: float | None):
+    import librosa
+
+    duration = None if end is None else end - (start or 0.0)
+    audio, _ = librosa.load(audio_path, sr=sr, mono=mono, offset=start or 0.0, duration=duration)
+    return audio
+
+
+def separate(audio_path: str, out_path: str, model_name: str, stem: str,
+             start: float | None = None, end: float | None = None, log: Log = _echo) -> None:
+    """Demucs で1つの楽器の音だけを取り出して WAV に保存する。
+
+    demucs のコマンド(保存に torchaudio を使い、新しい版では動かないことがある)ではなく、
+    モデルを直接呼んで soundfile で保存する。
+    """
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from demucs.apply import apply_model
+    from demucs.pretrained import get_model
+
+    if model_name not in _demucs:
+        log(f"音源分離モデル（{model_name}）を読み込み中…（初回はダウンロードします）")
+        _demucs[model_name] = get_model(model_name)
+    model = _demucs[model_name]
+    model.eval()
+    audio = _load_clip(audio_path, model.samplerate, False, start, end)
+    if audio.ndim == 1:
+        audio = np.stack([audio, audio])
+    audio = audio[: model.audio_channels]
+    if audio.shape[0] < model.audio_channels:
+        audio = np.repeat(audio, model.audio_channels, axis=0)
+    wav = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32))
+    # モデルの学習時と同じく、音量を正規化してから分離する
+    ref = wav.mean(0)
+    mean, std = ref.mean(), ref.std() + 1e-8
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    log(f"音源分離中（{device}、{wav.shape[1] / model.samplerate:.0f}秒の音声から{stem}を取り出す）…")
+    with torch.no_grad():
+        out = apply_model(model, ((wav - mean) / std)[None], device=device, split=True, overlap=0.25,
+                          progress=False)[0]
+    part = out[model.sources.index(stem)] * std + mean
+    sf.write(out_path, part.cpu().numpy().T, model.samplerate)
+
+
+def transcribe_pitch(audio_path: str, midi_path: str, inst: str, start: float | None = None,
+                     end: float | None = None, log: Log = _echo) -> int:
+    """Basic Pitch でギター・ベースの音声を MIDI にする。戻り値: 音符の数"""
+    import logging
+
+    import soundfile as sf
+
+    spec = INSTRUMENTS[inst]
+    # basic_pitch は使わない実行環境(TensorFlow など)が無いと警告を出すので黙らせる
+    logging.getLogger().setLevel(logging.ERROR)
+    from basic_pitch import FilenameSuffix, build_icassp_2022_model_path
+    from basic_pitch.inference import predict
+
+    if start is not None or end is not None:
+        clip = os.path.splitext(midi_path)[0] + ".clip.wav"
+        sf.write(clip, _load_clip(audio_path, 22050, True, start, end), 22050)
+        audio_path = clip
+    log(f"採譜中（Basic Pitch、{spec['label']}）…")
+    try:
+        import onnxruntime  # noqa: F401  Windows・新しい Python では ONNX 版のモデルを使う
+        model = build_icassp_2022_model_path(FilenameSuffix.onnx)
+    except ImportError:
+        from basic_pitch import ICASSP_2022_MODEL_PATH as model
+    with contextlib.redirect_stdout(_LineWriter(log)):
+        _, midi, notes = predict(
+            audio_path, model,
+            # 既定値(0.5 / 0.3)より厳しめにして、余韻や倍音から出る余分な音を減らす
+            onset_threshold=0.6, frame_threshold=0.4,
+            minimum_note_length=90 if inst == "guitar" else 110,  # ms
+            minimum_frequency=spec["fmin"], maximum_frequency=spec["fmax"],
+            multiple_pitch_bends=False, melodia_trick=True)
+    if audio_path.endswith(".clip.wav"):
+        os.remove(audio_path)
+    for ins in midi.instruments:
+        ins.program = spec["program"]
+        ins.pitch_bends = []
+        if inst == "bass":
+            # ベースは単音: 重なった音は後の音の頭で切る
+            ns = sorted(ins.notes, key=lambda n: (n.start, -n.velocity))
+            kept = []
+            for n in ns:
+                if kept and n.start - kept[-1].start < 0.03:
+                    continue  # ほぼ同時の音(倍音の誤検出)は強いほうだけ
+                if kept and kept[-1].end > n.start:
+                    kept[-1].end = n.start
+                kept.append(n)
+            ins.notes = kept
+    midi.write(midi_path)
+    return sum(len(i.notes) for i in midi.instruments)
+
+
 def _toml_str(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -146,8 +254,15 @@ def add_to_catalog(rel_stem: str, composer: str, title: str) -> bool:
 
 def convert(source: str, *, name: str = "", title: str = "", composer: str = "",
             start: str | None = None, end: str | None = None, subdir: str = DEFAULT_SUBDIR,
-            catalog: bool = True, log: Log = _echo) -> tuple[str, str]:
-    """URL か音声ファイルを MIDI にする。戻り値: (MIDIのパス, 曲名)"""
+            catalog: bool = True, instrument: str = "piano", split: bool = True,
+            log: Log = _echo) -> tuple[str, str]:
+    """URL か音声ファイルを MIDI にする。戻り値: (MIDIのパス, 曲名)
+
+    instrument: piano / guitar / bass。split: ギター・ベースで、先に音源分離するか
+    （その楽器だけの録音なら不要）
+    """
+    if instrument not in INSTRUMENTS:
+        raise ValueError(f"楽器は {', '.join(INSTRUMENTS)} のどれかです: {instrument}")
     if is_url(source):
         audio_path, src_title = download_audio(source, log)
     else:
@@ -156,13 +271,28 @@ def convert(source: str, *, name: str = "", title: str = "", composer: str = "",
         audio_path = source
         src_title = os.path.splitext(os.path.basename(source))[0]
 
+    spec = INSTRUMENTS[instrument]
     title = title or src_title
-    stem = slug(name or src_title)
+    stem = slug(name or src_title) + ("" if name else spec.get("suffix", ""))
+    if instrument != "piano" and not name:
+        title += f"（{spec['label']}）"
     out_dir = os.path.join(PIECES_DIR, subdir)
     os.makedirs(out_dir, exist_ok=True)
     midi_path = os.path.join(out_dir, stem + ".mid")
 
-    transcribe_audio(audio_path, midi_path, seconds(start), seconds(end), log)
+    t0, t1 = seconds(start), seconds(end)
+    if instrument == "piano":
+        transcribe_audio(audio_path, midi_path, t0, t1, log)
+    else:
+        if split:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            part = os.path.join(CACHE_DIR, f"{stem}.{spec['stem']}.wav")
+            separate(audio_path, part, spec["model"], spec["stem"], t0, t1, log)
+            audio_path, t0, t1 = part, None, None
+        count = transcribe_pitch(audio_path, midi_path, instrument, t0, t1, log)
+        if count == 0:
+            raise RuntimeError(f"{spec['label']}の音が見つかりませんでした")
+        log(f"{count}個の音符を採譜しました")
     log(f"保存しました: {os.path.relpath(midi_path, ROOT)}")
 
     if catalog:

@@ -311,7 +311,7 @@ class App:
     def _transcribe_dialog(self):
         """URL（または音声ファイル）を入力して、ピアノ演奏を自動採譜する。"""
         dlg = tk.Toplevel(self.root)
-        dlg.title("URLから採譜（ピアノ演奏 → MIDI）")
+        dlg.title("URLから採譜（演奏 → MIDI）")
         dlg.transient(self.root)
         dlg.resizable(False, False)
         frm = ttk.Frame(dlg, padding=12)
@@ -348,10 +348,31 @@ class App:
                 fields["source"].set(path)
 
         ttk.Button(frm, text="ファイル…", command=browse).grid(row=0, column=2, padx=(0, 4))
-        ttk.Label(frm, foreground="#555", wraplength=520, justify="left", text=(
-            "ピアノソロの演奏ほど正確に採譜できます。MIDI は pieces/youtube/ に保存され、曲の一覧にも登録されます。\n"
-            "動画は、ダウンロードが認められているもの（自分の演奏など）を使い、個人の練習用にとどめてください。"
-        )).grid(row=len(rows), column=0, columnspan=3, sticky="w", pady=(8, 4))
+        from .transcribe import INSTRUMENTS
+        r = len(rows)
+        ttk.Label(frm, text="採譜する楽器").grid(row=r, column=0, sticky="w", pady=3)
+        labels = {spec["label"]: key for key, spec in INSTRUMENTS.items()}
+        inst_var = tk.StringVar(value=INSTRUMENTS["piano"]["label"])
+        inst_box = ttk.Combobox(frm, state="readonly", width=10, values=list(labels), textvariable=inst_var)
+        inst_box.grid(row=r, column=1, sticky="w", padx=6, pady=3)
+        split_var = tk.BooleanVar(value=True)
+        split_chk = ttk.Checkbutton(frm, text="バンド演奏からこの楽器の音だけを取り出す（音源分離）",
+                                    variable=split_var)
+        split_chk.grid(row=r + 1, column=1, columnspan=2, sticky="w", padx=6)
+        note = ttk.Label(frm, foreground="#555", wraplength=520, justify="left")
+        note.grid(row=r + 2, column=0, columnspan=3, sticky="w", pady=(8, 4))
+        common = ("MIDI は pieces/youtube/ に保存され、曲の一覧にも登録されます。\n"
+                  "動画は、ダウンロードが認められているもの（自分の演奏など）を使い、個人の練習用にとどめてください。")
+
+        def on_inst(_=None):
+            piano = labels[inst_var.get()] == "piano"
+            split_chk.state(["disabled"] if piano else ["!disabled"])
+            note.config(text=("ピアノソロの演奏ほど正確に採譜できます。" if piano else
+                              "ギター・ベースは Demucs で音源分離してから Basic Pitch で採譜します。"
+                              "その楽器だけの録音なら、音源分離を外すと速く正確です。") + common)
+
+        inst_box.bind("<<ComboboxSelected>>", on_inst)
+        on_inst()
 
         def ok():
             v = {k: var.get().strip() for k, var in fields.items()}
@@ -365,17 +386,17 @@ class App:
                 messagebox.showwarning("URLから採譜", "開始・終了は 1:23 や 83 のように入力してください。", parent=dlg)
                 return
             dlg.destroy()
-            self._transcribe_async(**v)
+            self._transcribe_async(**v, instrument=labels[inst_var.get()], split=split_var.get())
 
         btns = ttk.Frame(frm)
-        btns.grid(row=len(rows) + 1, column=0, columnspan=3, sticky="e", pady=(6, 0))
+        btns.grid(row=r + 3, column=0, columnspan=3, sticky="e", pady=(6, 0))
         ttk.Button(btns, text="変換", command=ok).pack(side="left", padx=4)
         ttk.Button(btns, text="キャンセル", command=dlg.destroy).pack(side="left")
         dlg.bind("<Return>", lambda e: ok())
         dlg.bind("<Escape>", lambda e: dlg.destroy())
         dlg.grab_set()
 
-    def _transcribe_async(self, source, title, composer, start, end):
+    def _transcribe_async(self, source, title, composer, start, end, instrument="piano", split=True):
         self.url_btn.state(["disabled"])
 
         def log(msg):
@@ -385,11 +406,15 @@ class App:
             try:
                 from .transcribe import convert
                 midi_path, name = convert(source, title=title, composer=composer,
-                                          start=start or None, end=end or None, log=log)
+                                          start=start or None, end=end or None, log=log,
+                                          instrument=instrument, split=split)
             except Exception as e:  # noqa: BLE001
                 err = str(e) or type(e).__name__
                 if isinstance(e, ImportError):
-                    err += "\n\n採譜には torch と piano_transcription_inference が必要です（README 参照）。"
+                    err += ("\n\n採譜には torch と piano_transcription_inference が必要です（README 参照）。"
+                            if instrument == "piano" else
+                            "\n\nギター・ベースの採譜には basic-pitch と onnxruntime"
+                            + ("、音源分離には demucs" if split else "") + " が必要です（README 参照）。")
                 self._ui_queue.put(lambda: self._transcribed(None, err))
                 return
             display = f"{composer}：{name}" if composer else name
